@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<rss version="2.0" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle">
+  <channel>
+    <title>Compositor</title>
+    <item>
+      <title>Version 1.6.4</title>
+      <pubDate>Thu, 05 Nov 2026 01:16:20 +0000</pubDate>
+      <sparkle:version>63</sparkle:version>
+      <sparkle:shortVersionString>1.6.4</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>26.0</sparkle:minimumSystemVersion>
+      <link>https://github.com/robbietilton/Compositor/releases/tag/v1.6.4</link>
+      <changes><![CDATA[Cleaner, more modern color swatches throughout the app
+UI polish across tool bars, selection tools, layer effects and dialogs
+Feather now adds up each time you press it
+Fixed a selection expansion and contraction bug]]></changes>
+      <enclosure url="https://github.com/robbietilton/Compositor/releases/download/v1.6.4/Compositor.dmg" sparkle:edSignature="G6UcAvBBSI9gMp2l3dZ1w58acK+IZtY2tgUGfV56DWfxPR6R1plLfNVTvquDZcAxVMZ4i/+6OwNN8fU03XjFCg==" length="8830663" type="application/octet-stream"/>
+    </item>
+  </channel>
+</rss>

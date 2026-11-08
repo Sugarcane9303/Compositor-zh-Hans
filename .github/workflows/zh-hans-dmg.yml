@@ -1,0 +1,152 @@
+name: Build zh-Hans DMG
+
+# 在 GitHub 的 macOS 26 runner 上编译汉化版，产出可直接下载的 DMG。
+# 触发方式：Actions → Build zh-Hans DMG → Run workflow。
+# 参数 make_release 勾上时，会顺便建一个 Release 挂上 DMG（公开仓库更好分享）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      make_release:
+        description: 同时创建 GitHub Release 并附上 DMG
+        type: boolean
+        default: false
+
+concurrency:
+  group: zh-hans-dmg-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  dmg:
+    name: build dmg
+    # Apple 芯片的 macOS 26 镜像；Xcode 26 已预装多个版本。
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # 优先用最新的一台 Xcode 26.x；镜像里没装 26 系列时退回系统默认。
+      - name: Select Xcode 26
+        run: |
+          set -euo pipefail
+          xc=$(ls -d /Applications/Xcode_26*.app 2>/dev/null | sort -t. -k2,2n -k3,3n | tail -1 || true)
+          if [[ -z "${xc:-}" ]]; then
+            xc=$(ls -d /Applications/Xcode*.app 2>/dev/null | sort | tail -1)
+            echo "::warning::镜像里没有 Xcode 26，退回 $xc"
+          fi
+          echo "Using $xc"
+          sudo xcode-select -s "$xc"
+          xcodebuild -version
+
+      - name: Resolve Swift packages
+        run: >
+          xcodebuild -resolvePackageDependencies
+          -project Compositor.xcodeproj
+          -scheme Compositor
+          -onlyUsePackageVersionsFromResolvedFile
+
+      # 与工程 Debug 配置一致：ad-hoc 签名（"-"）+ 空 team，不需要任何证书。
+      # 沙盒与 hardened runtime 照常生效；关掉自动更新，免得被上游英文版覆盖。
+      - name: Build Release
+        run: >
+          xcodebuild build
+          -project Compositor.xcodeproj
+          -scheme Compositor
+          -configuration Release
+          -destination 'platform=macOS,arch=arm64'
+          -derivedDataPath DerivedData
+          CODE_SIGN_STYLE=Manual
+          CODE_SIGN_IDENTITY=-
+          DEVELOPMENT_TEAM=""
+          PROVISIONING_PROFILE_SPECIFIER=""
+          INFOPLIST_KEY_SUEnableAutomaticChecks=NO
+
+      # 汉化没进包就直接失败，别产出一个英文版的 DMG。
+      - name: Check the localization landed in the app
+        id: app
+        run: |
+          set -euo pipefail
+          APP=DerivedData/Build/Products/Release/Compositor.app
+          test -d "$APP" || { echo "::error::$APP 不存在"; exit 1; }
+          PLIST="$APP/Contents/Info.plist"
+
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Compositor $VERSION"
+          echo "CFBundleLocalizations: $(plutil -extract CFBundleLocalizations json -o - "$PLIST")"
+
+          STRINGS="$APP/Contents/Resources/zh-Hans.lproj/Localizable.strings"
+          COUNT=0
+          if [[ -f "$STRINGS" ]]; then
+            COUNT=$(plutil -p "$STRINGS" | wc -l | tr -d ' ')
+          fi
+          echo "zh-Hans 词条：$COUNT 条"
+
+          # 目录里有 1487 条；编译后 .strings 会略少（空值与未改动的键会被丢弃），
+          # 低于 1000 条基本意味着 String Catalog 没进 target。
+          if (( COUNT < 1000 )); then
+            echo "::error::中文词条只有 $COUNT 条，汉化没被打进 App 包"
+            ls -R "$APP/Contents/Resources" | head -60
+            exit 1
+          fi
+
+          # 签名是 ad-hoc 的，验不过只警告——真正的判据是能不能起，DMG 还是要产出来。
+          codesign --verify --strict "$APP" \
+            && echo "签名校验通过（ad-hoc）" \
+            || echo "::warning::codesign --verify 没通过，App 可能起不来"
+
+      - name: Package DMG
+        run: |
+          set -euo pipefail
+          APP=DerivedData/Build/Products/Release/Compositor.app
+          VERSION="${{ steps.app.outputs.version }}"
+          STAGE=dmg-stage
+          rm -rf "$STAGE"
+          mkdir -p "$STAGE"
+          # ditto 而不是 cp -R：保留符号链接与扩展属性，签名才不会被破坏
+          ditto "$APP" "$STAGE/Compositor.app"
+          ln -s /Applications "$STAGE/Applications"
+
+          DMG="Compositor-${VERSION}-zh-Hans.dmg"
+          hdiutil create \
+            -volname "Compositor 汉化版 $VERSION" \
+            -srcfolder "$STAGE" \
+            -format UDZO -ov -quiet "$DMG"
+          ls -lh "$DMG"
+          shasum -a 256 "$DMG" | tee "$DMG.sha256"
+          echo "DMG=$DMG" >> "$GITHUB_ENV"
+
+      - name: Upload DMG
+        uses: actions/upload-artifact@v7
+        with:
+          name: Compositor-${{ steps.app.outputs.version }}-zh-Hans
+          path: |
+            *.dmg
+            *.dmg.sha256
+          retention-days: 30
+
+      - name: Create release
+        if: ${{ inputs.make_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: zh-hans-${{ steps.app.outputs.version }}
+        run: |
+          set -euo pipefail
+          NOTES=$(cat <<EOF
+          Compositor ${{ steps.app.outputs.version }} 简体中文版，由 GitHub Actions 在 macOS 26 上编译。
+
+          - 本地 ad-hoc 签名，未公证：首次打开若被拦截，右键 → 打开，或执行
+            \`xattr -dr com.apple.quarantine /Applications/Compositor.app\`
+          - 已关闭自动更新检查，避免被上游英文版替换
+          - 源码与补丁见本仓库
+          EOF
+          )
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" "$DMG" "$DMG.sha256" --clobber
+          else
+            gh release create "$TAG" "$DMG" "$DMG.sha256" --title "Compositor ${{ steps.app.outputs.version }} 简体中文版" --notes "$NOTES"
+          fi
